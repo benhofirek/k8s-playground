@@ -320,7 +320,7 @@ The repository grows in stages. The target layout is:
 │       ├── kind/
 │       └── aws-local/
 ├── floci/
-│   └── compose.yaml       # Floci, run with podman-compose
+│   └── compose.yaml
 ├── kubernetes/
 │   ├── bootstrap/
 │   ├── platform/
@@ -334,8 +334,6 @@ The repository grows in stages. The target layout is:
 │   ├── api/
 │   ├── worker/
 │   └── frontend/
-├── .github/
-│   └── workflows/         # CI
 └── docs/                  # Runbooks and notes
 ```
 

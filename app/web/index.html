@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Status tracker</title>
+<style>
+  :root {
+    --bg: #f2f5f7; --fg: #13202b; --muted: #5b6874; --line: #d3dbe1; --field: #fff;
+    --up: #17795a; --down: #c0332a; --unknown: #8d99a4; --tint: #e3e9ee;
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e151b; --fg: #e6edf2; --muted: #8b99a5; --line: #26333d; --field: #141e26;
+      --up: #3fbf93; --down: #ef6b61; --unknown: #6f7c87; --tint: #1b2731;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 760px; margin: 0 auto; padding: 40px 20px 80px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  h1 { margin: 0; font-size: 28px; font-weight: 650; letter-spacing: -0.02em; }
+  .pill { font-size: 14px; color: var(--muted); }
+  .pill.up { color: var(--up); } .pill.down { color: var(--down); }
+
+  form { display: flex; flex-wrap: wrap; gap: 8px; margin: 28px 0 6px; }
+  input, button { font: inherit; color: inherit; }
+  input {
+    background: var(--field); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; min-width: 0;
+  }
+  input[name=name] { flex: 1 1 140px; }
+  input[name=url] { flex: 3 1 240px; }
+  input[name=interval] { flex: 0 0 76px; }
+  input:focus-visible, button:focus-visible, .head:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
+  form button {
+    background: var(--fg); color: var(--bg); border: 0; border-radius: 6px; padding: 8px 16px; font-weight: 600; cursor: pointer;
+  }
+  .err { min-height: 22px; margin: 0 0 18px; color: var(--down); font-size: 14px; }
+
+  #list { border-top: 1px solid var(--line); }
+  .svc { border-bottom: 1px solid var(--line); }
+  .head { display: flex; align-items: center; gap: 14px; padding: 14px 4px; cursor: pointer; }
+  .head:hover { background: var(--tint); }
+  .dot { flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--unknown); }
+  .dot.up { background: var(--up); } .dot.down { background: var(--down); }
+  .who { flex: 1; min-width: 0; }
+  .who strong { display: block; font-weight: 600; }
+  .who small {
+    display: block; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font: 12.5px ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .meta { color: var(--muted); font-size: 13px; white-space: nowrap; text-align: right; }
+  .del {
+    background: none; border: 0; color: var(--muted); font-size: 20px; line-height: 1; padding: 4px 8px; border-radius: 4px; cursor: pointer;
+  }
+  .del:hover { color: var(--down); }
+
+  .detail { padding: 2px 4px 18px 28px; }
+  .facts { color: var(--muted); font-size: 13.5px; margin-bottom: 10px; }
+  .facts b { color: var(--fg); font-weight: 600; }
+  .fail { color: var(--down); font-size: 13.5px; margin-bottom: 10px; }
+  .strip { display: flex; gap: 2px; align-items: stretch; height: 28px; }
+  .strip i { flex: 1 1 0; max-width: 10px; border-radius: 2px; background: var(--up); }
+  .strip i.bad { background: var(--down); }
+  .empty { color: var(--muted); padding: 28px 4px; }
+  @media (max-width: 520px) { .meta { display: none; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Status tracker</h1>
+    <span id="summary" class="pill">Loading…</span>
+  </header>
+
+  <form id="add">
+    <input name="name" placeholder="Name" maxlength="100" required aria-label="Service name">
+    <input name="url" type="url" placeholder="https://example.com/health" required aria-label="URL to check">
+    <input name="interval" type="number" min="5" max="3600" value="30" aria-label="Check interval in seconds" title="Check every N seconds">
+    <button>Add service</button>
+  </form>
+  <p id="formerr" class="err" role="alert"></p>
+
+  <section id="list" aria-live="polite"></section>
+</main>
+
+<script>
+const $ = (sel) => document.querySelector(sel);
+
+// Builds DOM with textContent only, so service names and error strings can't inject markup.
+function el(tag, props = {}, ...kids) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (k.startsWith('on')) n.addEventListener(k.slice(2), v);
+    else if (k === 'class') n.className = v;
+    else n.setAttribute(k, v);
+  }
+  n.append(...kids.filter((x) => x != null && x !== false));
+  return n;
+}
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...opts });
+  if (res.status === 204) return null;
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || res.statusText);
+  return body;
+}
+
+function ago(iso) {
+  const s = Math.max(0, Math.round((Date.now() - new Date(iso)) / 1000));
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
+}
+
+const expanded = new Set();
+
+function summarize(list) {
+  const s = $('#summary');
+  const down = list.filter((x) => x.status.state === 'down').length;
+  if (!list.length) { s.textContent = 'No services yet'; s.className = 'pill'; }
+  else if (down) { s.textContent = `${down} of ${list.length} down`; s.className = 'pill down'; }
+  else if (list.every((x) => x.status.state === 'unknown')) { s.textContent = 'Waiting for first checks'; s.className = 'pill'; }
+  else { s.textContent = 'All systems operational'; s.className = 'pill up'; }
+}
+
+function row(s, detail) {
+  const st = s.status;
+  const toggle = () => { expanded.has(s.id) ? expanded.delete(s.id) : expanded.add(s.id); load(); };
+  const head = el('div', { class: 'head', role: 'button', tabindex: '0', 'aria-expanded': String(!!detail), onclick: toggle,
+      onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } } },
+    el('span', { class: `dot ${st.state}`, title: st.state }),
+    el('div', { class: 'who' }, el('strong', {}, s.name), el('small', {}, s.url)),
+    el('span', { class: 'meta' }, st.state === 'unknown' ? 'waiting for first check' : `${st.latency_ms} ms · ${ago(st.checked_at)}`),
+    el('button', { class: 'del', title: `Delete ${s.name}`, 'aria-label': `Delete ${s.name}`, onclick: async (e) => {
+      e.stopPropagation();
+      if (!confirm(`Delete ${s.name} and its check history?`)) return;
+      try { await api(`/api/services/${s.id}`, { method: 'DELETE' }); expanded.delete(s.id); } catch (err) { $('#formerr').textContent = err.message; }
+      load();
+    } }, '×'));
+
+  let body = null;
+  if (detail) {
+    const { status, checks } = detail;
+    const uptime = status.uptime_24h != null ? `${status.uptime_24h}%` : 'no data';
+    body = el('div', { class: 'detail' },
+      el('div', { class: 'facts' }, 'Uptime, last 24h: ', el('b', {}, uptime),
+        `. Checked every ${s.interval_seconds}s, expects HTTP ${s.expected_status}.`),
+      status.error ? el('div', { class: 'fail' }, `Last failure: ${status.error}`) : null,
+      el('div', { class: 'strip', role: 'img', 'aria-label': `Last ${checks.length} checks, oldest to newest` },
+        ...[...checks].reverse().map((c) => el('i', { class: c.ok ? '' : 'bad',
+          title: `${new Date(c.checked_at).toLocaleString()}: ${c.ok ? c.latency_ms + ' ms' : c.error}` }))));
+  }
+  return el('article', { class: 'svc' }, head, body);
+}
+
+async function load() {
+  let services;
+  try { services = await api('/api/services'); }
+  catch { const s = $('#summary'); s.textContent = 'Can’t reach the API'; s.className = 'pill down'; return; }
+
+  const details = new Map();
+  await Promise.all([...expanded].map(async (id) => {
+    try {
+      const [status, checks] = await Promise.all([
+        api(`/api/services/${id}/status`), api(`/api/services/${id}/checks?limit=60`)]);
+      details.set(id, { status, checks });
+    } catch { expanded.delete(id); }
+  }));
+
+  summarize(services);
+  const list = $('#list');
+  list.replaceChildren(...services.map((s) => row(s, details.get(s.id))));
+  if (!services.length) list.append(el('p', { class: 'empty' }, 'Add a service above to start monitoring it.'));
+}
+
+$('#add').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const form = e.target, fd = new FormData(form);
+  $('#formerr').textContent = '';
+  try {
+    await api('/api/services', { method: 'POST', body: JSON.stringify({
+      name: fd.get('name'), url: fd.get('url'), interval_seconds: Number(fd.get('interval')) }) });
+    form.reset();
+  } catch (err) { $('#formerr').textContent = err.message; }
+  load();
+});
+
+load();
+setInterval(load, 5000);
+</script>
+</body>
+</html>
